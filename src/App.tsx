@@ -2,7 +2,7 @@ import { Suspense, lazy } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { useAuth } from './ctx/AuthContext'
 import { Layout } from './components/Layout'
-import { Spinner } from './components/ui'
+import { Button, ErrorNote, Spinner } from './components/ui'
 import SignIn from './pages/SignIn'
 import Home from './pages/Home'
 import Feed from './pages/Feed'
@@ -19,7 +19,26 @@ const StatsPage = lazy(() => import('./pages/StatsPage'))
 const RecapPage = lazy(() => import('./pages/RecapPage'))
 
 export default function App() {
-  const { session, me, loading } = useAuth()
+  const { session, me, loading, membersError, refreshMembers } = useAuth()
+
+  // A roster fetch that failed outright keeps `loading` true so nobody is
+  // mistaken for a non-member — so offer a retry rather than spinning forever.
+  if (loading && membersError) {
+    return (
+      <div className="min-h-screen bg-page flex items-center justify-center px-4">
+        <div className="w-full max-w-sm space-y-3 text-center">
+          <div className="text-3xl" aria-hidden>
+            📡
+          </div>
+          <div className="font-semibold">Couldn't reach the crew</div>
+          <ErrorNote message={membersError.message} />
+          <Button full onClick={() => refreshMembers()}>
+            Try again
+          </Button>
+        </div>
+      </div>
+    )
+  }
 
   if (loading) {
     return (

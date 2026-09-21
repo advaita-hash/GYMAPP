@@ -10,7 +10,7 @@ import type { BodyStat, Goal, Habit, HabitLog, Workout, WorkoutType } from '../l
 import { WEEKDAYS, WORKOUT_TYPE_META } from '../lib/types'
 import {
   addDays, currentMonthKey, fmtMonth, monthKeyOf, monthRange, parseISODate,
-  prevMonthKey, today, weekStartOf, weekdayOf,
+  prevMonthKey, toISODate, today, weekStartOf, weekdayOf,
 } from '../lib/dates'
 import { computeStandings } from '../lib/points'
 import { fetchRangeBundle, type RangeBundle } from '../lib/data'
@@ -100,9 +100,20 @@ function daysBetween(start: string, end: string): number {
   return Math.round((parseISODate(end).getTime() - parseISODate(start).getTime()) / 86400000) + 1
 }
 
-/** "15–21" — fmtWeek without the month names, for tight chart ticks. */
-function shortWeekLabel(weekStart: string): string {
-  return `${parseISODate(weekStart).getDate()}–${parseISODate(addDays(weekStart, 6)).getDate()}`
+/** "15–21" — day numbers of a covered range, for tight chart ticks. */
+function rangeLabel(from: string, to: string): string {
+  return `${parseISODate(from).getDate()}–${parseISODate(to).getDate()}`
+}
+
+/**
+ * Days of [start, lastDay] the habit actually existed for — a habit created
+ * mid-month (or after the month) must not be charged for days before it existed.
+ * `active` is a current flag, so paused habits still count for their past days.
+ */
+function habitDaysInWindow(h: Habit, start: string, lastDay: string): number {
+  const created = toISODate(new Date(h.created_at))
+  const from = created > start ? created : start
+  return from > lastDay ? 0 : daysBetween(from, lastDay)
 }
 
 /** Last minus first non-null value of a body metric (needs ≥ 2 values). */
@@ -139,22 +150,20 @@ function workoutMix(workouts: Workout[]): string {
 
 /** The sharpest 1–2 things to fix next month, in priority order. */
 function improveBullets(args: {
-  habits: Habit[]
+  habits: { id: string; name: string; days: number }[]
   habitLogs: HabitLog[]
   workouts: Workout[]
   bodyStats: BodyStat[]
-  elapsedDays: number
 }): string[] {
   const out: string[] = []
-  if (args.elapsedDays > 0 && args.habits.length > 0) {
-    let worst: { name: string; pct: number } | null = null
-    for (const h of args.habits) {
-      const done = args.habitLogs.filter((l) => l.habit_id === h.id && l.completed).length
-      const pct = Math.min(100, Math.round((100 * done) / args.elapsedDays))
-      if (worst === null || pct < worst.pct) worst = { name: h.name, pct }
-    }
-    if (worst && worst.pct < 60) out.push(`${worst.name} slipped — ${worst.pct}%`)
+  let worst: { name: string; pct: number } | null = null
+  for (const h of args.habits) {
+    if (h.days <= 0) continue
+    const done = args.habitLogs.filter((l) => l.habit_id === h.id && l.completed).length
+    const pct = Math.min(100, Math.round((100 * done) / h.days))
+    if (worst === null || pct < worst.pct) worst = { name: h.name, pct }
   }
+  if (worst && worst.pct < 60) out.push(`${worst.name} slipped — ${worst.pct}%`)
   if (args.workouts.length > 0) {
     const byWeekday = [0, 0, 0, 0, 0, 0, 0]
     for (const w of args.workouts) byWeekday[weekdayOf(w.logged_on)] += 1
@@ -188,7 +197,9 @@ async function loadRecap(mk: string): Promise<RecapData> {
     fetchRangeBundle(prev.start, prev.end),
     supabase.from('gym_body_stats').select('*').order('recorded_on', { ascending: true }),
     supabase.from('gym_goals').select('*'),
-    supabase.from('gym_habits').select('*').eq('active', true),
+    // Every habit, not just the active ones: `active` is today's flag, but a
+    // paused habit still existed (and counted) for the month being recapped.
+    supabase.from('gym_habits').select('*'),
   ])
   if (statsRes.error) throw statsRes.error
   if (goalsRes.error) throw goalsRes.error
@@ -261,24 +272,31 @@ export default function RecapPage() {
     )
     const prevShort = fmtMonth(prevMonthKey(mk)).split(' ')[0].slice(0, 3)
 
-    // Weekly crew points across every week overlapping the month.
-    const weeks: { label: string; value: number }[] = []
+    // Weekly crew points across every week overlapping the month. A week that
+    // straddles the month boundary only holds the days inside the month, so it is
+    // labelled by the range it actually covers and flagged as partial.
+    const weeks: { label: string; value: number; partial: boolean }[] = []
     for (let ws = weekStartOf(start); ws <= end; ws = addDays(ws, 7)) {
       const wEnd = addDays(ws, 6)
-      const wWorkouts = data.bundle.workouts.filter((w) => w.logged_on >= ws && w.logged_on <= wEnd)
-      const wLogs = data.bundle.habitLogs.filter((l) => l.log_date >= ws && l.log_date <= wEnd)
+      const from = ws < start ? start : ws
+      const to = wEnd > end ? end : wEnd
+      const wWorkouts = data.bundle.workouts.filter((w) => w.logged_on >= from && w.logged_on <= to)
+      const wLogs = data.bundle.habitLogs.filter((l) => l.log_date >= from && l.log_date <= to)
       const pts = computeStandings(members, wWorkouts, data.bundle.setsByWorkout, wLogs)
         .reduce((sum, r) => sum + r.points, 0)
-      weeks.push({ label: shortWeekLabel(ws), value: pts })
+      const partial = from !== ws || to !== wEnd
+      weeks.push({ label: `${rangeLabel(from, to)}${partial ? '*' : ''}`, value: pts, partial })
     }
 
-    const elapsedDays = daysBetween(start, today() < end ? today() : end)
+    const lastDay = today() < end ? today() : end
 
     const cards = standings.map((row) => {
       const mine = memberBundle(data.bundle, row.userId)
       const t = totals(mine)
-      const activeHabits = data.habits.filter((h) => h.user_id === row.userId)
-      const denom = activeHabits.length * elapsedDays
+      const habitWindows = data.habits
+        .filter((h) => h.user_id === row.userId)
+        .map((h) => ({ id: h.id, name: h.name, days: habitDaysInWindow(h, start, lastDay) }))
+      const denom = habitWindows.reduce((sum, h) => sum + h.days, 0)
       const adherencePct = denom > 0 ? Math.min(100, Math.round((100 * t.habitsDone) / denom)) : null
       const monthStats = data.bodyStats.filter(
         (s) => s.user_id === row.userId && s.recorded_on >= start && s.recorded_on <= end,
@@ -287,8 +305,8 @@ export default function RecapPage() {
         (g) =>
           g.user_id === row.userId &&
           g.resolved_at != null &&
-          g.resolved_at.slice(0, 10) >= start &&
-          g.resolved_at.slice(0, 10) <= end,
+          toISODate(new Date(g.resolved_at)) >= start &&
+          toISODate(new Date(g.resolved_at)) <= end,
       )
       return {
         row,
@@ -300,11 +318,10 @@ export default function RecapPage() {
         missed: resolved.filter((g) => g.status === 'missed').length,
         resolvedCount: resolved.length,
         bullets: improveBullets({
-          habits: activeHabits,
+          habits: habitWindows,
           habitLogs: mine.habitLogs,
           workouts: mine.workouts,
           bodyStats: monthStats,
-          elapsedDays,
         }),
       }
     })
@@ -401,6 +418,11 @@ export default function RecapPage() {
           <SectionTitle>Crew points by week</SectionTitle>
           <Card>
             <CategoryBars data={view.weeks} unit="pts" />
+            {view.weeks.some((w) => w.partial) && (
+              <p className="text-[11px] text-faint mt-2 px-1">
+                * Partial week — only the days inside {fmtMonth(mk)} are counted.
+              </p>
+            )}
           </Card>
 
           {mvp && (

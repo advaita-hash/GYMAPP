@@ -52,12 +52,30 @@ one last place.
 
 ### Access model
 
-- Any signed-in member can **read** everything (crew visibility by design).
+**The pact is invite-only.** Signing up is not the same as getting in: a new account
+sees nothing until it redeems the crew's invite code, which is what creates its
+membership. Everything else keys off that.
+
+- **Members read everything** — that mutual visibility is the point of the app.
+- **Non-members read nothing.** Without a membership row, every `gym_*` table and
+  every workout photo returns empty. This matters because Supabase signup is open to
+  anyone who finds the URL, and the app holds weights, body-fat percentages and photos.
 - Everyone can only **write their own** rows — enforced by RLS, except week
   finalization (`gym_week_results`), which any member may perform for the whole crew;
   the app makes finalization idempotent and the draw deterministic, so it's race-safe.
 - Photos upload only into the uploader's own folder; the bucket is private and the app
   uses short-lived signed URLs.
+
+The starting invite code is **`IRONPACT`** — share it with the crew, and change it
+whenever you like:
+
+```sql
+-- add a new code (several can be valid at once), then retire the old one
+insert into gym_pact_codes (code, label) values ('NEWCODE', 'spring intake');
+delete from gym_pact_codes where code = 'IRONPACT';
+```
+
+Removing a code never removes anyone already in the pact.
 
 ## Develop
 

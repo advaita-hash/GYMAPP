@@ -21,15 +21,18 @@ export async function fetchMembers(): Promise<Member[]> {
   if (e1) throw e1
   if (e2) throw e2
   const byId = new Map((profiles as Profile[] | null)?.map((p) => [p.id, p]) ?? [])
+  // The color slot comes from join order across the *unfiltered* list, so one
+  // person leaving never repaints everyone who joined after them.
   return ((gyms as GymProfile[] | null) ?? [])
-    .filter((g) => byId.has(g.user_id))
-    .map((g, i) => {
+    .map((g, i) => ({ g, slot: i }))
+    .filter(({ g }) => byId.has(g.user_id))
+    .map(({ g, slot }) => {
       const p = byId.get(g.user_id)!
       return {
         id: g.user_id,
         name: p.name,
-        color: MEMBER_COLORS[i % MEMBER_COLORS.length],
-        slot: i,
+        color: MEMBER_COLORS[slot % MEMBER_COLORS.length],
+        slot,
         gym: g,
       }
     })

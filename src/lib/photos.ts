@@ -15,8 +15,15 @@ export async function uploadWorkoutPhoto(userId: string, file: File): Promise<st
   return path
 }
 
-export async function deleteWorkoutPhoto(path: string): Promise<void> {
-  await supabase.storage.from(BUCKET).remove([path])
+/**
+ * Best-effort photo removal. Callers delete the database row first, so a failure
+ * here only leaves an unreferenced object in the bucket — never a workout whose
+ * proof photo has gone missing. Returns false if the object outlived its row.
+ */
+export async function deleteWorkoutPhoto(path: string): Promise<boolean> {
+  const { error } = await supabase.storage.from(BUCKET).remove([path])
+  urlCache.delete(path)
+  return !error
 }
 
 /** Signed URL for one photo (cached ~50 min; links are valid 1 h). */

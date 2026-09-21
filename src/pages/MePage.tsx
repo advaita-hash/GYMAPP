@@ -233,10 +233,31 @@ function MeInner({
       return
     }
     setSavingStat(true)
-    const { error } = await supabase.from('gym_body_stats').upsert(
-      { user_id: me.id, recorded_on: statDate, weight_kg, body_fat_pct, muscle_mass_kg },
-      { onConflict: 'user_id,recorded_on' },
-    )
+    // Merge into any existing row for this day: a blank field keeps what is already logged.
+    const { data: existing, error: readError } = await supabase
+      .from('gym_body_stats')
+      .select('*')
+      .eq('user_id', me.id)
+      .eq('recorded_on', statDate)
+      .maybeSingle()
+    if (readError) {
+      setStatError(readError.message)
+      setSavingStat(false)
+      return
+    }
+    const prev = existing as BodyStat | null
+    const { error } = prev
+      ? await supabase
+        .from('gym_body_stats')
+        .update({
+          weight_kg: weight_kg ?? prev.weight_kg,
+          body_fat_pct: body_fat_pct ?? prev.body_fat_pct,
+          muscle_mass_kg: muscle_mass_kg ?? prev.muscle_mass_kg,
+        })
+        .eq('id', prev.id)
+      : await supabase
+        .from('gym_body_stats')
+        .insert({ user_id: me.id, recorded_on: statDate, weight_kg, body_fat_pct, muscle_mass_kg })
     if (error) {
       setStatError(error.message)
       setSavingStat(false)

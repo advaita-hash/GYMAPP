@@ -179,14 +179,29 @@ export default function Home() {
     [data, todayISO],
   )
 
+  // Each logged workout ticks off at most one planned entry: first the entry it
+  // was logged against (schedule_id), then — for anything left over — a single
+  // still-open entry of the same type.
+  const doneEntryIds = useMemo(() => {
+    const done = new Set<string>()
+    const leftover: Workout[] = []
+    for (const w of data?.todaysWorkouts ?? []) {
+      const exact = todayPlan.find((e) => e.id === w.schedule_id && !done.has(e.id))
+      if (exact) done.add(exact.id)
+      else leftover.push(w)
+    }
+    for (const w of leftover) {
+      const byType = todayPlan.find(
+        (e) => e.workout_type === w.workout_type && !done.has(e.id),
+      )
+      if (byType) done.add(byType.id)
+    }
+    return done
+  }, [data, todayPlan])
+
   const entryDone = useCallback(
-    (entry: ScheduleEntry) =>
-      (data?.todaysWorkouts ?? []).some(
-        (w) =>
-          w.schedule_id === entry.id ||
-          (w.schedule_id == null && w.workout_type === entry.workout_type),
-      ),
-    [data],
+    (entry: ScheduleEntry) => doneEntryIds.has(entry.id),
+    [doneEntryIds],
   )
 
   const actionableEntries = todayPlan.filter((e) => e.workout_type !== 'rest')

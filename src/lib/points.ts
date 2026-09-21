@@ -134,7 +134,9 @@ export function computeStandings(
   )
   rows.forEach((r, i) => {
     r.rank = i + 1
-    r.isTop2 = i < 2
+    // With only two people the runner-up is the loser, so they never also count
+    // as "top 2" — a treat and a punishment for the same week cancel out.
+    r.isTop2 = i < 2 && i < rows.length - 1
     r.isLast = i === rows.length - 1 && rows.length >= 2
   })
   return rows

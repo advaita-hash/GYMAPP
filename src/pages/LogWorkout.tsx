@@ -245,7 +245,7 @@ export default function LogWorkout() {
       schedule_id: scheduleId || null,
       workout_type: type,
       title,
-      duration_min: parseNumOrNull(durationMin),
+      duration_min: parseIntOrNull(durationMin),
       distance_km: type === 'cardio' ? parseNumOrNull(distanceKm) : null,
       intensity: type === 'sport' || type === 'other' ? intensity : null,
       notes,
@@ -269,15 +269,28 @@ export default function LogWorkout() {
     if (!date) return 'Pick a date.'
     if (date < minDate || date > maxDate) return 'Pick a date within the last two weeks.'
     if (!title.trim()) return 'Give your workout a title.'
-    const dur = parseNumOrNull(durationMin)
-    if (durationMin.trim() && (dur == null || dur <= 0)) return 'Duration must be a positive number of minutes.'
+    const dur = parseIntOrNull(durationMin)
+    if (durationMin.trim() && (dur == null || dur < 1 || dur > 600)) {
+      return 'Duration must be a whole number of minutes between 1 and 600.'
+    }
     if (type === 'cardio') {
       const dist = parseNumOrNull(distanceKm)
-      if (distanceKm.trim() && (dist == null || dist <= 0)) return 'Distance must be a positive number of km.'
+      if (distanceKm.trim() && (dist == null || dist <= 0 || dist > 300)) {
+        return 'Distance must be a positive number of km, up to 300.'
+      }
       if (dur == null && dist == null) return 'Cardio needs a distance or a duration.'
     }
-    if (type === 'strength' && !exercises.some((x) => x.name.trim())) {
-      return 'Add at least one named exercise.'
+    if (type === 'strength') {
+      if (!exercises.some((x) => x.name.trim())) return 'Add at least one named exercise.'
+      for (const r of buildSetRows(exercises)) {
+        if (r.set_no > 50) return `${r.exercise}: max 50 sets per exercise.`
+        if (r.reps != null && (r.reps < 1 || r.reps > 200)) {
+          return `${r.exercise} set ${r.set_no}: reps must be between 1 and 200.`
+        }
+        if (r.weight_kg != null && (r.weight_kg < 0 || r.weight_kg > 500)) {
+          return `${r.exercise} set ${r.set_no}: weight must be between 0 and 500 kg.`
+        }
+      }
     }
     return null
   }
@@ -304,7 +317,7 @@ export default function LogWorkout() {
         schedule_id: scheduleId || null,
         workout_type: type,
         title: title.trim(),
-        duration_min: parseNumOrNull(durationMin),
+        duration_min: parseIntOrNull(durationMin),
         distance_km: type === 'cardio' ? parseNumOrNull(distanceKm) : null,
         intensity: type === 'sport' || type === 'other' ? intensity : null,
         notes: notes.trim(),
@@ -324,7 +337,17 @@ export default function LogWorkout() {
         if (rows.length > 0) {
           const { error: setsError } = await supabase.from('gym_workout_sets').insert(rows)
           if (setsError) {
-            setErr(`Workout saved, but sets failed: ${setsError.message}`)
+            // Don't leave an orphan workout behind: a retry would insert a second one.
+            const { error: cleanupError } = await supabase
+              .from('gym_workouts')
+              .delete()
+              .eq('id', workout.id)
+            if (cleanupError) {
+              setErr(`Workout saved, but sets failed: ${setsError.message}`)
+            } else {
+              if (photoPath) await deleteWorkoutPhoto(photoPath).catch(() => {})
+              setErr(`Could not save your sets: ${setsError.message}. Nothing was saved — fix and try again.`)
+            }
             setBusy(false)
             return
           }
@@ -384,6 +407,7 @@ export default function LogWorkout() {
         <Field label="Title">
           <Input
             value={title}
+            maxLength={120}
             placeholder={TITLE_PLACEHOLDER[type]}
             onChange={(e) => setTitle(e.target.value)}
           />
@@ -393,7 +417,9 @@ export default function LogWorkout() {
           <Input
             type="number"
             inputMode="numeric"
-            min={0}
+            min={1}
+            max={600}
+            step="1"
             placeholder="e.g. 45"
             value={durationMin}
             onChange={(e) => setDurationMin(e.target.value)}
@@ -406,6 +432,7 @@ export default function LogWorkout() {
               type="number"
               inputMode="decimal"
               min={0}
+              max={300}
               step="0.1"
               placeholder="e.g. 5.2"
               value={distanceKm}
@@ -432,6 +459,7 @@ export default function LogWorkout() {
                   <div className="flex items-center gap-2">
                     <Input
                       value={ex.name}
+                      maxLength={80}
                       placeholder="Exercise, e.g. Bench press"
                       onChange={(e) => updateExerciseName(ei, e.target.value)}
                     />
@@ -450,7 +478,8 @@ export default function LogWorkout() {
                       <Input
                         type="number"
                         inputMode="numeric"
-                        min={0}
+                        min={1}
+                        max={200}
                         placeholder="Reps"
                         value={s.reps}
                         onChange={(e) => updateSet(ei, si, { reps: e.target.value })}
@@ -459,6 +488,7 @@ export default function LogWorkout() {
                         type="number"
                         inputMode="decimal"
                         min={0}
+                        max={500}
                         step="0.5"
                         placeholder="Weight (kg)"
                         value={s.weight}

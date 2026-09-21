@@ -35,6 +35,21 @@ export function Card({ children, className = '', onClick }: { children: ReactNod
   return (
     <div
       onClick={onClick}
+      role={onClick ? 'button' : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onKeyDown={
+        onClick
+          ? (e) => {
+              // Only act when the card itself has focus — a nested <button> handles
+              // its own Enter/Space and must not also fire the card.
+              if (e.target !== e.currentTarget) return
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                onClick()
+              }
+            }
+          : undefined
+      }
       className={`bg-surface border border-line rounded-2xl p-4 ${onClick ? 'cursor-pointer active:bg-raised' : ''} ${className}`}
     >
       {children}

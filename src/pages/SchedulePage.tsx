@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { WEEKDAYS, WEEKDAYS_SHORT, WORKOUT_TYPE_META } from '../lib/types'
 import type { ScheduleEntry, ScheduleType } from '../lib/types'
@@ -47,6 +47,8 @@ export default function SchedulePage() {
   const isMine = viewedId !== null && viewedId === myId
 
   const [entries, setEntries] = useState<ScheduleEntry[]>([])
+  /** Whose rows `entries` actually holds — null until the first load lands. */
+  const [loadedId, setLoadedId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -69,7 +71,11 @@ export default function SchedulePage() {
     [orderedMembers, viewedId],
   )
 
+  /** Bumped per request so a slow earlier fetch can't overwrite a newer one. */
+  const reqRef = useRef(0)
+
   const load = useCallback(async (userId: string) => {
+    const gen = ++reqRef.current
     setLoading(true)
     setError(null)
     const { data, error: err } = await supabase
@@ -78,11 +84,13 @@ export default function SchedulePage() {
       .eq('user_id', userId)
       .order('weekday')
       .order('position')
+    if (gen !== reqRef.current) return
     if (err) {
       setError(err.message)
     } else {
       setEntries((data ?? []) as ScheduleEntry[])
     }
+    setLoadedId(userId)
     setLoading(false)
   }, [])
 
@@ -166,6 +174,7 @@ export default function SchedulePage() {
         .from('gym_schedule')
         .update({ ...values, updated_at: new Date().toISOString() })
         .eq('id', sheet.entry.id)
+        .eq('user_id', myId)
       if (err) {
         setSheetError(err.message)
         setSaving(false)
@@ -201,9 +210,13 @@ export default function SchedulePage() {
   }
 
   async function removeEntry() {
-    if (!sheet || sheet.mode !== 'edit' || !viewedId) return
+    if (!sheet || sheet.mode !== 'edit' || !myId || !viewedId) return
     setSheetError(null)
-    const { error: err } = await supabase.from('gym_schedule').delete().eq('id', sheet.entry.id)
+    const { error: err } = await supabase
+      .from('gym_schedule')
+      .delete()
+      .eq('id', sheet.entry.id)
+      .eq('user_id', myId)
     if (err) {
       setSheetError(err.message)
       return
@@ -222,7 +235,11 @@ export default function SchedulePage() {
   }
 
   const viewedFirstName = viewedMember ? viewedMember.name.split(/\s+/)[0] : ''
-  const showEmptyOther = !loading && !error && !isMine && entries.length === 0
+  /** Rows on screen are only trustworthy once the load for the selected member has landed. */
+  const showSpinner = loading || loadedId !== viewedId
+  /** Never offer edit affordances unless the rendered rows are the signed-in user's own. */
+  const canEdit = isMine && loadedId === myId
+  const showEmptyOther = !showSpinner && !error && !isMine && entries.length === 0
 
   const sheetTitle =
     sheet?.mode === 'add'
@@ -255,7 +272,7 @@ export default function SchedulePage() {
         })}
       </div>
 
-      {loading ? (
+      {showSpinner ? (
         <Spinner label="Loading plan…" />
       ) : error ? (
         <div className="mt-4">
@@ -282,7 +299,7 @@ export default function SchedulePage() {
                     <span className="text-accent normal-case tracking-normal"> · today</span>
                   )}
                 </h2>
-                {isMine && (
+                {canEdit && (
                   <Button variant="ghost" size="sm" onClick={() => openAdd(day)}>
                     + Add
                   </Button>
@@ -295,7 +312,7 @@ export default function SchedulePage() {
                   {dayEntries.map((e) => {
                     const meta = WORKOUT_TYPE_META[e.workout_type]
                     return (
-                      <Card key={e.id} onClick={isMine ? () => openEdit(e) : undefined}>
+                      <Card key={e.id} onClick={canEdit ? () => openEdit(e) : undefined}>
                         <div className="flex items-center gap-2">
                           <Chip className={meta.chip}>
                             {meta.emoji} {meta.label}

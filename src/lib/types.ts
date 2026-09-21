@@ -163,6 +163,28 @@ export const INTENSITY_META: Record<Intensity, { label: string; pts: number }> =
   hard: { label: 'Hard', pts: 10 },
 }
 
+export interface PresetHabit {
+  name: string
+  target: number
+  unit: string
+  direction: HabitDirection
+}
+
+/**
+ * The suggested daily non-negotiables, offered both during onboarding and on the
+ * habits page. Both screens hide a preset the user already has by matching on
+ * name, so this list lives in one place — two copies drifting by a single word
+ * ("Screen" vs "Screen time") silently creates duplicate, double-scoring habits.
+ */
+export const PRESET_HABITS: PresetHabit[] = [
+  { name: 'Sleep', target: 8, unit: 'h', direction: 'at_least' },
+  { name: 'Steps', target: 10000, unit: 'steps', direction: 'at_least' },
+  { name: 'Water', target: 3, unit: 'L', direction: 'at_least' },
+  { name: 'Protein', target: 120, unit: 'g', direction: 'at_least' },
+  { name: 'Screen time', target: 2, unit: 'h', direction: 'at_most' },
+  { name: 'Study', target: 3, unit: 'h', direction: 'at_least' },
+]
+
 export const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
 export const WEEKDAYS_SHORT = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 

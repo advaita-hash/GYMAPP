@@ -6,7 +6,7 @@ import type { Member, Workout, WorkoutSet } from '../lib/types'
 import { INTENSITY_META, WORKOUT_TYPE_META } from '../lib/types'
 import { fmtRelative } from '../lib/dates'
 import { workoutPoints } from '../lib/points'
-import { deleteWorkoutPhoto, photoUrls } from '../lib/photos'
+import { deleteWorkoutPhoto, photoUrl, photoUrls } from '../lib/photos'
 import { useAuth } from '../ctx/AuthContext'
 import { PageHeader } from '../components/Layout'
 import {
@@ -79,22 +79,39 @@ function FilterChip({ active, onClick, children }: {
 // Workout card
 // ---------------------------------------------------------------------------
 
-function WorkoutCard({ w, sets, member, signedUrl, isMine, onDelete }: {
+function WorkoutCard({ w, sets, member, signedUrl, isMine, capped, onDelete }: {
   w: Workout
   sets: WorkoutSet[]
   member: Member | undefined
   signedUrl: string | undefined
   isMine: boolean
+  /** True when the loaded feed proves this is the 3rd+ workout of that day (scores nothing). */
+  capped: boolean
   onDelete: () => void
 }) {
   const [pointsOpen, setPointsOpen] = useState(false)
   const [detailsOpen, setDetailsOpen] = useState(false)
+  const [imgSrc, setImgSrc] = useState<string | undefined>(signedUrl)
+  const retriedRef = useRef(false)
   const meta = WORKOUT_TYPE_META[w.workout_type]
   const breakdown = workoutPoints(w, sets)
   const name = member?.name ?? 'Member'
   const color = member?.color ?? FALLBACK_COLOR
   const metric = metricLine(w, sets)
   const exercises = groupSets(sets)
+
+  useEffect(() => {
+    setImgSrc(signedUrl)
+    retriedRef.current = false
+  }, [signedUrl])
+
+  // Signed links expire after ~1 h; re-sign once if the browser can't load it.
+  const onImgError = useCallback(async () => {
+    if (retriedRef.current || !w.photo_path) return
+    retriedRef.current = true
+    const fresh = await photoUrl(w.photo_path)
+    if (fresh) setImgSrc(fresh)
+  }, [w.photo_path])
 
   return (
     <Card className="space-y-3">
@@ -114,9 +131,10 @@ function WorkoutCard({ w, sets, member, signedUrl, isMine, onDelete }: {
         {metric && <div className="text-sub text-sm mt-0.5">{metric}</div>}
       </div>
 
-      {w.photo_path && signedUrl && (
+      {w.photo_path && imgSrc && (
         <img
-          src={signedUrl}
+          src={imgSrc}
+          onError={onImgError}
           className="w-full max-h-80 object-cover rounded-xl border border-line"
           loading="lazy"
           alt=""
@@ -127,8 +145,11 @@ function WorkoutCard({ w, sets, member, signedUrl, isMine, onDelete }: {
 
       <div className="flex items-center gap-1">
         <button type="button" onClick={() => setPointsOpen((o) => !o)} aria-expanded={pointsOpen}>
-          <Chip className="bg-accent/15 text-accent">+{breakdown.total} pts</Chip>
+          <Chip className={capped ? 'bg-white/5 text-faint line-through' : 'bg-accent/15 text-accent'}>
+            +{breakdown.total} pts
+          </Chip>
         </button>
+        {capped && <span className="text-faint text-[11px]">doesn't count (daily cap)</span>}
         {exercises.length > 0 && (
           <Button variant="ghost" size="sm" onClick={() => setDetailsOpen((o) => !o)}>
             {detailsOpen ? 'Hide details' : 'Details'}
@@ -185,6 +206,25 @@ export default function Feed() {
 
   const memberById = new Map(members.map((m) => [m.id, m]))
 
+  // Only the first 2 workouts per member per day score (see computeStandings).
+  // The feed is paginated, so a workout counts as capped only when the loaded
+  // rows prove it: 2+ strictly earlier same-day workouts for that member in hand.
+  const cappedIds = new Set<string>()
+  const byMemberDay = new Map<string, Workout[]>()
+  for (const w of workouts) {
+    const key = `${w.user_id}|${w.logged_on}`
+    const list = byMemberDay.get(key) ?? []
+    list.push(w)
+    byMemberDay.set(key, list)
+  }
+  for (const list of byMemberDay.values()) {
+    if (list.length < 3) continue
+    for (const w of list) {
+      const earlier = list.filter((o) => o.created_at.localeCompare(w.created_at) < 0).length
+      if (earlier >= 2) cappedIds.add(w.id)
+    }
+  }
+
   const loadPage = useCallback(async (page: number, userId: string | null) => {
     const req = ++reqRef.current
     if (page === 0) {
@@ -224,7 +264,12 @@ export default function Feed() {
       if (req !== reqRef.current) return
       pageRef.current = page
       setHasMore(rows.length === PAGE_SIZE)
-      setWorkouts((prev) => (page === 0 ? rows : [...prev, ...rows]))
+      setWorkouts((prev) => {
+        if (page === 0) return rows
+        // Offset paging can hand back a row we already hold if the feed shifted.
+        const seen = new Set(prev.map((x) => x.id))
+        return [...prev, ...rows.filter((r) => !seen.has(r.id))]
+      })
       setSetsByWorkout((prev) => {
         const next = page === 0 ? new Map<string, WorkoutSet[]>() : new Map(prev)
         for (const [k, v] of pageSets) next.set(k, v)
@@ -253,9 +298,11 @@ export default function Feed() {
   const handleDelete = useCallback(async (w: Workout) => {
     setError(null)
     try {
-      if (w.photo_path) await deleteWorkoutPhoto(w.photo_path)
+      // Row first: a failed photo delete only orphans an object, but a failed row
+      // delete after the photo is gone would leave a workout with dead proof.
       const { error: e } = await supabase.from('gym_workouts').delete().eq('id', w.id)
       if (e) throw e
+      if (w.photo_path) await deleteWorkoutPhoto(w.photo_path)
       setWorkouts((prev) => prev.filter((x) => x.id !== w.id))
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not delete the workout.')
@@ -305,6 +352,7 @@ export default function Feed() {
               member={memberById.get(w.user_id)}
               signedUrl={w.photo_path ? urls.get(w.photo_path) : undefined}
               isMine={w.user_id === me?.id}
+              capped={cappedIds.has(w.id)}
               onDelete={() => handleDelete(w)}
             />
           ))}

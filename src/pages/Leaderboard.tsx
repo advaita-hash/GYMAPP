@@ -2,10 +2,10 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
-import type { Punishment, PunishmentStatus, WeekResult } from '../lib/types'
-import { addDays, currentWeekStart, fmtWeek } from '../lib/dates'
+import type { Member, Punishment, PunishmentStatus, WeekResult } from '../lib/types'
+import { addDays, currentWeekStart, fmtWeek, toISODate, weekStartOf } from '../lib/dates'
 import { POINT_RULES, computeStandings, pickPunishment } from '../lib/points'
-import { fetchPunishments, fetchWeekBundle, fetchWeekResults } from '../lib/data'
+import { fetchPunishments, fetchRangeBundle, fetchWeekBundle, fetchWeekResults } from '../lib/data'
 import type { RangeBundle } from '../lib/data'
 import { useAuth } from '../ctx/AuthContext'
 import {
@@ -23,6 +23,23 @@ function errMsg(e: unknown): string {
     return (e as { message: string }).message
   }
   return 'Something went wrong — try again.'
+}
+
+function plural(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? '' : 's'}`
+}
+
+/** How many weeks back the finalize section scans for unsealed weeks with activity. */
+const FINALIZE_WEEKS_BACK = 12
+
+/**
+ * Members who were already in the pact during a given week — someone who joined
+ * later can't be ranked (or punished) for a week they weren't part of.
+ * gym.created_at is an ISO timestamp; compare its local calendar date.
+ */
+function membersInWeek(list: Member[], weekStart: string): Member[] {
+  const lastDay = addDays(weekStart, 6)
+  return list.filter((m) => toISODate(new Date(m.gym.created_at)) <= lastDay)
 }
 
 /** Rank icon: 💀 for last place (crews of 3+), medals for the podium, plain number otherwise. */
@@ -80,14 +97,21 @@ export default function Leaderboard() {
         fetchPunishments(),
         fetchWeekResults(),
       ])
-      // Previous 4 weeks, oldest first — candidates for finalization.
-      const prevStarts = [-28, -21, -14, -7].map((d) => addDays(ws, d))
+      // Recent past weeks, oldest first — candidates for finalization. Only the
+      // ones that aren't sealed yet are looked at, in a single range fetch.
+      const prevStarts = Array.from({ length: FINALIZE_WEEKS_BACK }, (_, i) =>
+        addDays(ws, -7 * (FINALIZE_WEEKS_BACK - i)),
+      )
       const sealed = new Set(results.map((r) => r.week_start))
       const unsealed = prevStarts.filter((p) => !sealed.has(p))
-      const bundles = await Promise.all(unsealed.map((p) => fetchWeekBundle(p)))
-      const pending = unsealed.filter(
-        (_, i) => bundles[i].workouts.length > 0 || bundles[i].habitLogs.length > 0,
-      )
+      let pending: string[] = []
+      if (unsealed.length > 0) {
+        const span = await fetchRangeBundle(unsealed[0], addDays(unsealed[unsealed.length - 1], 6))
+        const active = new Set<string>()
+        for (const w of span.workouts) active.add(weekStartOf(w.logged_on))
+        for (const l of span.habitLogs) active.add(weekStartOf(l.log_date))
+        pending = unsealed.filter((p) => active.has(p))
+      }
       setWeekBundle(bundle)
       setPunishments(puns)
       setWeekResults(results)
@@ -108,9 +132,14 @@ export default function Leaderboard() {
   const standings = useMemo(
     () =>
       weekBundle
-        ? computeStandings(members, weekBundle.workouts, weekBundle.setsByWorkout, weekBundle.habitLogs)
+        ? computeStandings(
+            membersInWeek(members, weekStart),
+            weekBundle.workouts,
+            weekBundle.setsByWorkout,
+            weekBundle.habitLogs,
+          )
         : [],
-    [members, weekBundle],
+    [members, weekBundle, weekStart],
   )
 
   const weekIsQuiet =
@@ -124,26 +153,35 @@ export default function Leaderboard() {
     setFinalizeError(null)
     try {
       const [bundle, puns] = await Promise.all([fetchWeekBundle(ws), fetchPunishments()])
-      const rows = computeStandings(members, bundle.workouts, bundle.setsByWorkout, bundle.habitLogs)
+      // Only the people who were in the pact that week get ranked for it.
+      const eligible = membersInWeek(members, ws)
+      const rows = computeStandings(eligible, bundle.workouts, bundle.setsByWorkout, bundle.habitLogs)
+      // Nobody can lose a week they were alone in.
+      const canLose = eligible.length >= 2
       const pool = puns.filter((p) => p.active)
-      const loserPunishment = pickPunishment(ws, pool)
-      const payload = rows.map((s) => ({
-        week_start: ws,
-        user_id: s.userId,
-        points: s.points,
-        rank: s.rank,
-        workouts_count: s.workoutsCount,
-        habits_completed: s.habitsCompleted,
-        is_top2: s.isTop2,
-        is_last: s.isLast,
-        punishment_id: s.isLast && loserPunishment ? loserPunishment.id : null,
-        punishment_status: s.isLast && loserPunishment ? 'pending' : 'none',
-        finalized_by: me.id,
-      }))
-      const { error: upErr } = await supabase
-        .from('gym_week_results')
-        .upsert(payload, { onConflict: 'week_start,user_id', ignoreDuplicates: true })
-      if (upErr) throw upErr
+      const loserPunishment = canLose ? pickPunishment(ws, pool) : null
+      const payload = rows.map((s) => {
+        const isLast = canLose && s.isLast
+        return {
+          week_start: ws,
+          user_id: s.userId,
+          points: s.points,
+          rank: s.rank,
+          workouts_count: s.workoutsCount,
+          habits_completed: s.habitsCompleted,
+          is_top2: s.isTop2,
+          is_last: isLast,
+          punishment_id: isLast && loserPunishment ? loserPunishment.id : null,
+          punishment_status: isLast && loserPunishment ? 'pending' : 'none',
+          finalized_by: me.id,
+        }
+      })
+      if (payload.length > 0) {
+        const { error: upErr } = await supabase
+          .from('gym_week_results')
+          .upsert(payload, { onConflict: 'week_start,user_id', ignoreDuplicates: true })
+        if (upErr) throw upErr
+      }
       await load()
     } catch (e) {
       setFinalizeError(errMsg(e))
@@ -282,7 +320,7 @@ export default function Leaderboard() {
                     <div className="text-right shrink-0">
                       <div className="font-bold">{r.points}</div>
                       <div className="text-[11px] text-sub">
-                        {r.workoutsCount} workouts · {r.habitsCompleted} habits
+                        {plural(r.workoutsCount, 'workout')} · {plural(r.habitsCompleted, 'habit')}
                       </div>
                     </div>
                   </div>
@@ -376,10 +414,10 @@ export default function Leaderboard() {
                           </div>
                           {r.is_last && (
                             <div className="flex items-center gap-2 flex-wrap pl-12 pr-2 pt-0.5 pb-1">
-                              {r.punishment_id ? (
+                              {r.punishment_status !== 'none' ? (
                                 <>
                                   <span className="text-xs text-sub">
-                                    💀 {pun?.title ?? 'a punishment (since deleted)'}
+                                    💀 {pun ? pun.title : 'punishment removed from the pool'}
                                   </span>
                                   <PunishmentChip status={r.punishment_status} />
                                   {r.user_id === me?.id && r.punishment_status === 'pending' && (

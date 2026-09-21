@@ -6,6 +6,7 @@ import { supabase } from '../lib/supabase'
 import { fetchMembers, fetchPunishments } from '../lib/data'
 import { addDays, currentWeekStart, fmtDate, today } from '../lib/dates'
 import type { Goal, GoalTimeframe, Habit, HabitDirection, Member, Profile, Punishment } from '../lib/types'
+import { PRESET_HABITS } from '../lib/types'
 import { useAuth } from '../ctx/AuthContext'
 import {
   Avatar,
@@ -28,21 +29,6 @@ import {
 
 const STEPS = ['Welcome', 'Starting stats', 'Punishment pool', 'Micro habits', 'Goals']
 
-interface PresetHabit {
-  name: string
-  target: number
-  unit: string
-  direction: HabitDirection
-}
-
-const PRESET_HABITS: PresetHabit[] = [
-  { name: 'Sleep', target: 8, unit: 'h', direction: 'at_least' },
-  { name: 'Steps', target: 10000, unit: 'steps', direction: 'at_least' },
-  { name: 'Water', target: 3, unit: 'L', direction: 'at_least' },
-  { name: 'Protein', target: 120, unit: 'g', direction: 'at_least' },
-  { name: 'Screen time', target: 2, unit: 'h', direction: 'at_most' },
-  { name: 'Study', target: 3, unit: 'h', direction: 'at_least' },
-]
 
 interface CustomHabitRow {
   key: number
@@ -105,12 +91,19 @@ function PactCard({ emoji, title, text }: { emoji: string; title: string; text: 
 // ---------------------------------------------------------------------------
 
 export default function Onboarding() {
-  const { session, refreshMembers } = useAuth()
+  const { session, refreshMembers, signOut } = useAuth()
   const uid = session?.user.id ?? ''
 
   const [step, setStep] = useState(0)
   const [initLoading, setInitLoading] = useState(true)
   const [initError, setInitError] = useState('')
+  // Invite gate: null while unknown, true when this account still has to redeem
+  // a code before it can see or write anything in the pact.
+  const [needsCode, setNeedsCode] = useState(false)
+  const [code, setCode] = useState('')
+  const [codeError, setCodeError] = useState('')
+  const [redeeming, setRedeeming] = useState(false)
+  const [initNonce, setInitNonce] = useState(0)
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
 
@@ -158,10 +151,21 @@ export default function Onboarding() {
     let cancelled = false
     ;(async () => {
       try {
-        const { error: upErr } = await supabase
+        // Membership is what gates every gym_* read, so check it before loading
+        // anything: a signed-in stranger sees the invite gate, not the wizard.
+        const { data: membership, error: memErr } = await supabase
           .from('gym_profiles')
-          .upsert({ user_id: uid, onboarded: false }, { onConflict: 'user_id', ignoreDuplicates: true })
-        if (upErr) throw upErr
+          .select('user_id')
+          .eq('user_id', uid)
+          .maybeSingle()
+        if (memErr) throw memErr
+        if (cancelled) return
+        if (!membership) {
+          setNeedsCode(true)
+          setInitLoading(false)
+          return
+        }
+        setNeedsCode(false)
         const [profRes, punishments, membersList, habitsRes, goalsRes] = await Promise.all([
           supabase.from('profiles').select('id,name,color,created_at').eq('id', uid).single(),
           fetchPunishments(),
@@ -201,7 +205,34 @@ export default function Onboarding() {
     return () => {
       cancelled = true
     }
-  }, [uid])
+  }, [uid, initNonce])
+
+  /** Redeem an invite code, which creates this account's pact membership. */
+  async function redeemCode() {
+    const entered = code.trim()
+    if (!entered) {
+      setCodeError('Enter the code your crew gave you.')
+      return
+    }
+    setRedeeming(true)
+    setCodeError('')
+    try {
+      const { data, error } = await supabase.rpc('join_pact', { p_code: entered })
+      if (error) throw error
+      if (data !== true) {
+        setCodeError("That code doesn't match. Ask the crew for the current one.")
+        return
+      }
+      await refreshMembers()
+      setInitLoading(true)
+      setNeedsCode(false)
+      setInitNonce((n) => n + 1)
+    } catch (e) {
+      setCodeError(errMsg(e))
+    } finally {
+      setRedeeming(false)
+    }
+  }
 
   // -------------------------------------------------------------------------
   // Step commits
@@ -446,22 +477,65 @@ export default function Onboarding() {
             🤝
           </div>
           <h1 className="text-2xl font-extrabold tracking-tight">Iron Pact</h1>
-          <div className="text-sm text-sub mt-1">
-            Step {step + 1} of {STEPS.length} · {STEPS[step]}
-          </div>
-          <div className="flex justify-center gap-1.5 mt-3" aria-hidden>
-            {STEPS.map((label, i) => (
-              <div
-                key={label}
-                className={`h-1.5 rounded-full transition-all ${
-                  i === step ? 'w-6 bg-accent' : i < step ? 'w-1.5 bg-accent/50' : 'w-1.5 bg-white/15'
-                }`}
-              />
-            ))}
-          </div>
+          {!needsCode && (
+            <>
+              <div className="text-sm text-sub mt-1">
+                Step {step + 1} of {STEPS.length} · {STEPS[step]}
+              </div>
+              <div className="flex justify-center gap-1.5 mt-3" aria-hidden>
+                {STEPS.map((label, i) => (
+                  <div
+                    key={label}
+                    className={`h-1.5 rounded-full transition-all ${
+                      i === step ? 'w-6 bg-accent' : i < step ? 'w-1.5 bg-accent/50' : 'w-1.5 bg-white/15'
+                    }`}
+                  />
+                ))}
+              </div>
+            </>
+          )}
         </div>
 
-        {initLoading ? (
+        {needsCode ? (
+          <div className="space-y-4">
+            <Card>
+              <div className="text-center">
+                <div className="text-3xl mb-2" aria-hidden>
+                  🔒
+                </div>
+                <div className="font-bold text-lg">This pact is invite-only</div>
+                <p className="text-sm text-sub mt-2">
+                  Everyone in the pact can see everyone's weight, body fat, photos and logs — so
+                  only people with the crew's code get in.
+                </p>
+              </div>
+              <div className="mt-5 space-y-3">
+                <Field label="Invite code">
+                  <Input
+                    value={code}
+                    onChange={(e) => setCode(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !redeeming) redeemCode()
+                    }}
+                    placeholder="e.g. IRONPACT"
+                    autoCapitalize="characters"
+                    autoComplete="off"
+                    maxLength={64}
+                  />
+                </Field>
+                {codeError && <ErrorNote message={codeError} />}
+                <Button full size="lg" onClick={redeemCode} disabled={redeeming}>
+                  {redeeming ? 'Checking…' : 'Join the pact'}
+                </Button>
+              </div>
+            </Card>
+            <div className="text-center">
+              <Button variant="ghost" size="sm" onClick={() => signOut()}>
+                Sign out
+              </Button>
+            </div>
+          </div>
+        ) : initLoading ? (
           <Spinner label="Setting things up…" />
         ) : initError ? (
           <div className="space-y-3">
