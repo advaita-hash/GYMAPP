@@ -56,8 +56,15 @@ begin
   return true;
 end $$;
 
-revoke execute on function public.join_pact(text) from anon;
-revoke execute on function public.is_pact_member() from anon;
+-- Functions are granted EXECUTE to PUBLIC by default and `anon` inherits that,
+-- so revoking from `anon` alone would be a no-op: revoke from PUBLIC and grant
+-- back only to signed-in users. (Neither leaks anything to anon regardless —
+-- both return false when auth.uid() is null — but the API surface should not
+-- be open in the first place.) Applied as migration gymapp_lock_down_pact_functions.
+revoke execute on function public.is_pact_member() from public;
+revoke execute on function public.join_pact(text) from public;
+grant execute on function public.is_pact_member() to authenticated;
+grant execute on function public.join_pact(text) to authenticated;
 
 -- Reads: members only (was: every signed-in user).
 drop policy "gym_profiles read" on public.gym_profiles;
